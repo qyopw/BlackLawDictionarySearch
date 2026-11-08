@@ -1,10 +1,12 @@
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <random>
@@ -127,33 +129,6 @@ std::string renderMarkup(const std::string& html) {
     return trim(result);
 }
 
-bool isFullyBold(const std::string& html) {
-    int boldDepth = 0;
-    bool sawBoldText = false;
-    for (std::size_t i = 0; i < html.size();) {
-        if (html[i] == '<') {
-            const auto end = html.find('>', i);
-            if (end == std::string::npos) return false;
-            const std::string tag = html.substr(i, end - i + 1);
-            if (tag == "<b>") ++boldDepth;
-            else if (tag == "</b>") --boldDepth;
-            i = end + 1;
-            continue;
-        }
-        const auto nextTag = html.find('<', i);
-        const std::string text = decodeEntities(html.substr(
-            i, nextTag == std::string::npos ? std::string::npos : nextTag - i));
-        for (unsigned char c : text) {
-            if (!std::isspace(c)) {
-                if (boldDepth <= 0) return false;
-                sawBoldText = true;
-            }
-        }
-        i = nextTag == std::string::npos ? html.size() : nextTag;
-    }
-    return sawBoldText && boldDepth == 0;
-}
-
 std::optional<int> readAttribute(const std::string& tag, const std::string& name) {
     const std::string key = name + "=\"";
     const auto start = tag.find(key);
@@ -179,41 +154,6 @@ std::optional<TextBlock> parseTextBlock(const std::string& line, int page) {
     const auto left = readAttribute(tag, "left");
     if (!top || !left) return std::nullopt;
     return TextBlock{page, *top, *left, line.substr(tagEnd + 1, contentEnd - tagEnd - 1)};
-}
-
-bool isEntryStart(const TextBlock& block) {
-    const bool firstColumn = block.left >= 35 && block.left <= 53;
-    const bool secondColumn = block.left >= 375 && block.left <= 395;
-    return block.top >= 70 && block.top < 1000 && (firstColumn || secondColumn) &&
-           isFullyBold(block.html) && !trim(stripTags(block.html)).empty();
-}
-
-std::string candidateTitle(const std::vector<TextBlock>& blocks, std::size_t index) {
-    const TextBlock& first = blocks[index];
-    std::string title = stripTags(first.html);
-    const int column = first.left < 300 ? 0 : 1;
-    for (std::size_t i = index + 1; i < blocks.size(); ++i) {
-        const TextBlock& next = blocks[i];
-        if (next.top != first.top || (next.left < 300 ? 0 : 1) != column ||
-            !isFullyBold(next.html)) break;
-        std::string part = stripTags(next.html);
-        if (!title.empty() && !part.empty() &&
-            !std::isspace(static_cast<unsigned char>(title.back())) &&
-            !std::isspace(static_cast<unsigned char>(part.front()))) title.push_back(' ');
-        title += part;
-    }
-
-    title = trim(title);
-    // Some entries include the first numbered sense in the same bold run as the headword.
-    const auto lastSpace = title.find_last_of(" \t");
-    if (lastSpace != std::string::npos && title.back() == '.') {
-        const std::string suffix = title.substr(lastSpace + 1, title.size() - lastSpace - 2);
-        if (!suffix.empty() && std::all_of(suffix.begin(), suffix.end(),
-                                           [](unsigned char c) { return std::isdigit(c); })) {
-            title = trim(title.substr(0, lastSpace));
-        }
-    }
-    return title;
 }
 
 std::string normalizeTerm(std::string value) {
@@ -242,6 +182,124 @@ std::string normalizeTerm(std::string value) {
            (normalized.back() == '.' || normalized.back() == ',' ||
             normalized.back() == ';' || normalized.back() == ':')) normalized.pop_back();
     return trim(normalized);
+}
+
+std::vector<std::string> termSearchForms(const std::string& value) {
+    const std::string term = normalizeTerm(value);
+    std::vector<std::string> forms{term};
+    auto addForm = [&](std::string form) {
+        if (!form.empty() && std::find(forms.begin(), forms.end(), form) == forms.end()) {
+            forms.push_back(std::move(form));
+        }
+    };
+    auto endsWith = [](const std::string& text, const std::string& suffix) {
+        return text.size() >= suffix.size() &&
+               text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
+    };
+
+    if (endsWith(term, "ies") && term.size() > 3) {
+        addForm(term.substr(0, term.size() - 3) + "y");
+    } else if (endsWith(term, "sses") || endsWith(term, "ches") ||
+               endsWith(term, "shes") || endsWith(term, "xes") ||
+               endsWith(term, "zes")) {
+        addForm(term.substr(0, term.size() - 2));
+    } else if (term.size() > 2 && endsWith(term, "s") &&
+               !endsWith(term, "ss") && !endsWith(term, "us") &&
+               !endsWith(term, "is") && !endsWith(term, "ics") &&
+               !endsWith(term, "news")) {
+        addForm(term.substr(0, term.size() - 1));
+    }
+    return forms;
+}
+
+std::array<int, 2> findColumnLeftMargins(const std::vector<TextBlock>& blocks) {
+    std::array<int, 2> margins{std::numeric_limits<int>::max(),
+                               std::numeric_limits<int>::max()};
+    for (const TextBlock& block : blocks) {
+        if (block.top < 70 || block.top >= 1000 || trim(stripTags(block.html)).empty()) continue;
+        const std::size_t column = block.left < 370 ? 0 : 1;
+        margins[column] = std::min(margins[column], block.left);
+    }
+    return margins;
+}
+
+bool isEntryStart(const TextBlock& block, const std::array<int, 2>& margins,
+                 bool hasEntrySpacing) {
+    if (block.page < 29 || block.top < 70 || block.top >= 1000 ||
+        !hasEntrySpacing || trim(stripTags(block.html)).empty()) return false;
+    const std::size_t column = block.left < 370 ? 0 : 1;
+    return margins[column] != std::numeric_limits<int>::max() &&
+           block.left <= margins[column] + 8;
+}
+
+std::string textLineForBlock(const std::vector<TextBlock>& blocks, std::size_t index) {
+    const TextBlock& first = blocks[index];
+    const int column = first.left < 370 ? 0 : 1;
+    std::string text = stripTags(first.html);
+    for (std::size_t i = index + 1; i < blocks.size(); ++i) {
+        const TextBlock& next = blocks[i];
+        if (next.top != first.top || (next.left < 370 ? 0 : 1) != column) break;
+        const std::string part = stripTags(next.html);
+        if (!part.empty()) text += " " + part;
+    }
+    return text;
+}
+
+bool headingMatches(const std::string& line, const std::string& requestedTerm) {
+    const std::string text = normalizeTerm(line);
+    if (text.compare(0, requestedTerm.size(), requestedTerm) != 0) return false;
+    if (text.size() == requestedTerm.size()) return true;
+
+    std::size_t next = requestedTerm.size();
+    while (next < text.size() && std::isspace(static_cast<unsigned char>(text[next]))) ++next;
+    if (next == text.size()) return true;
+    if (text[next] == '(') return true;
+    if (text[next] != '.' && text[next] != ',' && text[next] != ';' && text[next] != ':') {
+        return false;
+    }
+
+    ++next;
+    while (next < text.size() && std::isspace(static_cast<unsigned char>(text[next]))) ++next;
+    if (next == text.size()) return true;
+
+    // These starts are continuation prose or citations, not dictionary definitions.
+    if (text[next] == '-' || text.compare(next, 3, "\xE2\x80\x93") == 0 ||
+        text.compare(next, 3, "\xE2\x80\x94") == 0 ||
+        text.compare(next, 6, "also t") == 0 || text.compare(next, 3, "cf.") == 0 ||
+        text.compare(next, 6, "[cases") == 0) return false;
+    return true;
+}
+
+std::string headingRemainder(const TextBlock& block, const std::string& requestedTerm) {
+    const std::string plain = stripTags(block.html);
+    std::size_t source = 0;
+    for (std::size_t query = 0; query < requestedTerm.size();) {
+        if (plain.compare(source, 2, "\xC2\xAD") == 0) {
+            source += 2;
+            continue;
+        }
+        if (std::isspace(static_cast<unsigned char>(requestedTerm[query]))) {
+            while (source < plain.size() &&
+                   std::isspace(static_cast<unsigned char>(plain[source]))) ++source;
+            ++query;
+            continue;
+        }
+        if (source >= plain.size()) return {};
+        const unsigned char sourceChar = static_cast<unsigned char>(plain[source++]);
+        const unsigned char queryChar = static_cast<unsigned char>(requestedTerm[query++]);
+        if (sourceChar < 0x80 && queryChar < 0x80) {
+            if (std::tolower(sourceChar) != queryChar) return {};
+        } else if (sourceChar != queryChar) {
+            return {};
+        }
+    }
+
+    std::string remainder = trim(plain.substr(source));
+    if (!remainder.empty() && (remainder.front() == '.' || remainder.front() == ',' ||
+                               remainder.front() == ';' || remainder.front() == ':')) {
+        remainder.erase(remainder.begin());
+    }
+    return trim(remainder);
 }
 
 std::string appendText(std::string current, const std::string& html) {
@@ -356,20 +414,34 @@ std::map<std::string, std::string> findRequestedEntries(
     while (xml) {
         const std::vector<TextBlock> blocks = readPageBlocks(xml, currentPage, line);
         if (blocks.empty() && !xml) break;
+        const auto leftMargins = findColumnLeftMargins(blocks);
+        std::array<int, 2> previousTop{-1, -1};
         for (std::size_t i = 0; i < blocks.size(); ++i) {
             const TextBlock& block = blocks[i];
-            if (isEntryStart(block)) {
+            const std::size_t column = block.left < 370 ? 0 : 1;
+            const bool hasEntrySpacing = previousTop[column] < 0 ||
+                                         block.top - previousTop[column] >= 17;
+            if (isEntryStart(block, leftMargins, hasEntrySpacing)) {
                 saveCurrent();
-                const std::string key = normalizeTerm(candidateTitle(blocks, i));
-                if (!dictionaryStarted && block.page >= 29 && key == "a") dictionaryStarted = true;
-                if (dictionaryStarted && requested.count(key)) {
-                    currentKey = key;
+                // The first entries are on PDF page 29. Their text is not bold, so
+                // entry starts are detected by the left edge of each dictionary column.
+                if (!dictionaryStarted && block.page >= 29) dictionaryStarted = true;
+                const std::string headingLine = textLineForBlock(blocks, i);
+                auto match = std::find_if(requested.begin(), requested.end(),
+                                          [&](const std::string& term) {
+                                              return headingMatches(headingLine, term);
+                                          });
+                if (dictionaryStarted && match != requested.end()) {
+                    currentKey = *match;
                     capturing = true;
-                    currentEntry = appendText(std::move(currentEntry), block.html);
+                    currentEntry = "**" + currentKey + "**";
+                    const std::string remainder = headingRemainder(block, currentKey);
+                    if (!remainder.empty()) currentEntry += " " + remainder;
                 }
             } else if (capturing) {
                 currentEntry = appendText(std::move(currentEntry), block.html);
             }
+            if (block.top >= 70 && block.top < 1000) previousTop[column] = block.top;
         }
         if (!xml && !blocks.empty()) break;
     }
@@ -395,7 +467,8 @@ int main() {
             term = trim(term);
             if (term.empty()) continue;
             terms.push_back(term);
-            requested.insert(normalizeTerm(term));
+            const auto forms = termSearchForms(term);
+            requested.insert(forms.begin(), forms.end());
         }
         if (terms.empty()) {
             std::cerr << "В input.txt нет терминов для поиска.\n";
@@ -422,9 +495,13 @@ int main() {
         }
         for (std::size_t i = 0; i < terms.size(); ++i) {
             if (i != 0) output << "\n\n";
-            const auto entry = entries.find(normalizeTerm(terms[i]));
+            auto entry = entries.end();
+            for (const std::string& form : termSearchForms(terms[i])) {
+                entry = entries.find(form);
+                if (entry != entries.end()) break;
+            }
             if (entry == entries.end()) {
-                output << "**" << terms[i] << ".** Определение не найдено в PDF.";
+                output << "**" << terms[i] << "** Определение не найдено в PDF.";
             } else {
                 output << entry->second;
             }
