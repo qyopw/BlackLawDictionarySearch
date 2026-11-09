@@ -551,18 +551,40 @@ int main() {
         }
         const auto entries = findRequestedEntries(xml, requested);
 
+        // Спрашиваем пользователя, записывать ли ненайденные термины в output.txt.
+        // Работает одинаково на Windows и macOS (стандартный std::cin).
+        bool writeNotFound = true;
+        {
+            std::cout << "Записывать ли в output.txt термины, которые не найдены в PDF? (y/n, по умолчанию y): ";
+            std::string answer;
+            if (std::getline(std::cin, answer) && !answer.empty()) {
+                std::string lowerAnswer = answer;
+                for (auto& ch : lowerAnswer) {
+                    ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                }
+                if (lowerAnswer == "n" || lowerAnswer == "no" || lowerAnswer == "нет") {
+                    writeNotFound = false;
+                }
+            }
+        }
+
         std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
         if (!output) {
             std::cerr << "Не удалось создать output.txt.\n";
             return 1;
         }
+        bool firstWritten = true;
         for (std::size_t i = 0; i < terms.size(); ++i) {
-            if (i != 0) output << "\n\n";
             auto entry = entries.end();
             for (const std::string& form : termSearchForms(terms[i])) {
                 entry = entries.find(form);
                 if (entry != entries.end()) break;
             }
+            if (entry == entries.end() && !writeNotFound) {
+                continue; // пропускаем ненайденные термины
+            }
+            if (!firstWritten) output << "\n\n";
+            firstWritten = false;
             if (entry == entries.end()) {
                 output << "**" << terms[i] << "** Определение не найдено в PDF.";
             } else {
