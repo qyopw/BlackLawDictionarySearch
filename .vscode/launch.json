@@ -7,7 +7,7 @@
       "request": "launch",
       "args": [],
       "cwd": "/Users/egor/Documents/GitHub/BlackLawDictionarySearch",
-      "program": "/Users/egor/Documents/GitHub/BlackLawDictionarySearch/build/Debug/outDebug"
+      "program": "${workspaceFolder}/dictionary_search"
     }
   ]
 }

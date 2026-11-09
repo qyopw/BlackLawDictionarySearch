@@ -1,0 +1,42 @@
+name: Windows Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build with CMake (Release)
+        run: |
+          cmake -S . -B build
+          cmake --build build --config Release
+
+      - name: Prepare release package
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item .\dictionary_search.exe -Destination .\release\
+          Copy-Item .\README.md -Destination .\release\
+          # Пример input.txt для пользователей
+          @"
+doctrine
+doctrine of approximation
+"@ | Out-File -FilePath .\release\input.txt -Encoding utf8
+          # Пустой output.txt, который programme заполнит при запуске
+          New-Item -ItemType File -Path .\release\output.txt | Out-Null
+
+      - name: Create ZIP archive
+        run: |
+          Compress-Archive -Path .\release\* -DestinationPath BlackLawDictionarySearch-Windows.zip
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: BlackLawDictionarySearch-Windows.zip
+          generate_release_notes: true

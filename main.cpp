@@ -15,7 +15,9 @@
 #include <string>
 #include <vector>
 
+#if !defined(_WIN32)
 #include <sys/wait.h>
+#endif
 
 namespace fs = std::filesystem;
 
@@ -334,6 +336,18 @@ std::string shellQuote(const std::string& value) {
     return quoted;
 }
 
+#ifdef _WIN32
+std::string shellQuoteWin(const std::string& value) {
+    std::string quoted = "\"";
+    for (char c : value) {
+        if (c == '"') quoted += "\"\"";
+        else quoted.push_back(c);
+    }
+    quoted.push_back('"');
+    return quoted;
+}
+#endif
+
 struct TemporaryFile {
     fs::path path;
     ~TemporaryFile() {
@@ -367,13 +381,23 @@ TemporaryFile createTemporaryXmlPath() {
 }
 
 int extractPdfXml(const fs::path& pdfPath, const fs::path& xmlPath) {
+#if defined(_WIN32)
+    const std::string command = "pdftohtml -xml -hidden -i -stdout " +
+                                shellQuoteWin(pdfPath.string()) + " > " +
+                                shellQuoteWin(xmlPath.string()) + " 2>nul";
+#else
     const std::string command = "pdftohtml -xml -hidden -i -stdout " +
                                 shellQuote(pdfPath.string()) + " > " +
                                 shellQuote(xmlPath.string()) + " 2>/dev/null";
+#endif
     const int status = std::system(command.c_str());
     if (status == -1) return -1;
+#if defined(_WIN32)
+    return status;
+#else
     if (WIFEXITED(status)) return WEXITSTATUS(status);
     return -1;
+#endif
 }
 
 std::vector<TextBlock> readPageBlocks(std::ifstream& xml, int& currentPage, std::string& line) {
