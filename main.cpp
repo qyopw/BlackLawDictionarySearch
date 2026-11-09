@@ -10,6 +10,7 @@
 #include <map>
 #include <optional>
 #include <random>
+#include <regex>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -256,7 +257,10 @@ bool headingMatches(const std::string& line, const std::string& requestedTerm) {
     while (next < text.size() && std::isspace(static_cast<unsigned char>(text[next]))) ++next;
     if (next == text.size()) return true;
     if (text[next] == '(') return true;
-    if (text[next] != '.' && text[next] != ',' && text[next] != ';' && text[next] != ':') {
+    // Запятая, точка с запятой и двоеточие после термина означают
+    // инвертированную подзапись (например, "misconduct, affirmative"),
+    // а не часть основной статьи — такие совпадения отвергаем.
+    if (text[next] != '.') {
         return false;
     }
 
@@ -415,6 +419,31 @@ std::vector<TextBlock> readPageBlocks(std::ifstream& xml, int& currentPage, std:
     return blocks;
 }
 
+// Убирает из текста статьи секции подзаписей (например, "affirmative misconduct",
+// "juror misconduct" под "misconduct"), оставляя только определения основной статьи.
+// Подзапись в рендеренном Markdown выглядит как _affirmative misconduct._(1897).
+std::string stripSubEntries(std::string text) {
+    const std::regex subEntryPattern(R"(_[^_]+_\s*\(\d{4}\))");
+    std::sregex_iterator it(text.begin(), text.end(), subEntryPattern);
+    std::sregex_iterator end;
+
+    if (it == end) return text;
+
+    std::string result = text.substr(0, it->position());
+
+    std::size_t lastMatchEnd = 0;
+    for (; it != end; ++it) {
+        lastMatchEnd = it->position() + it->length();
+    }
+
+    if (lastMatchEnd < text.size()) {
+        if (!result.empty()) result += " ";
+        result += text.substr(lastMatchEnd);
+    }
+
+    return trim(result);
+}
+
 std::map<std::string, std::string> findRequestedEntries(
     std::ifstream& xml, const std::set<std::string>& requested) {
     std::map<std::string, std::string> found;
@@ -428,6 +457,7 @@ std::map<std::string, std::string> findRequestedEntries(
     auto saveCurrent = [&] {
         currentEntry = trim(currentEntry);
         if (capturing && !currentEntry.empty() && !found.count(currentKey)) {
+            currentEntry = stripSubEntries(currentEntry);
             found.emplace(currentKey, currentEntry);
         }
         currentEntry.clear();
@@ -446,21 +476,30 @@ std::map<std::string, std::string> findRequestedEntries(
             const bool hasEntrySpacing = previousTop[column] < 0 ||
                                          block.top - previousTop[column] >= 17;
             if (isEntryStart(block, leftMargins, hasEntrySpacing)) {
-                saveCurrent();
                 // The first entries are on PDF page 29. Their text is not bold, so
                 // entry starts are detected by the left edge of each dictionary column.
                 if (!dictionaryStarted && block.page >= 29) dictionaryStarted = true;
                 const std::string headingLine = textLineForBlock(blocks, i);
+                const std::string normHeading = normalizeTerm(headingLine);
                 auto match = std::find_if(requested.begin(), requested.end(),
                                           [&](const std::string& term) {
                                               return headingMatches(headingLine, term);
                                           });
                 if (dictionaryStarted && match != requested.end()) {
+                    // Нашли запрошенную статью — сохраняем предыдущую и начинаем новую.
+                    saveCurrent();
                     currentKey = *match;
                     capturing = true;
                     currentEntry = "**" + currentKey + "**";
                     const std::string remainder = headingRemainder(block, currentKey);
                     if (!remainder.empty()) currentEntry += " " + remainder;
+                } else if (capturing &&
+                           normHeading.find(currentKey) != std::string::npos) {
+                    // Подзапись текущей статьи (например, "affirmative misconduct" под "misconduct").
+                    // Не прерываем захват — продолжаем собирать определения основной статьи.
+                } else if (capturing) {
+                    // Началась совсем другая статья — сохраняем текущую и останавливаем захват.
+                    saveCurrent();
                 }
             } else if (capturing) {
                 currentEntry = appendText(std::move(currentEntry), block.html);
