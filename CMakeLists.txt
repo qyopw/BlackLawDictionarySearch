@@ -20,6 +20,7 @@ target_compile_features(dictionary_search PRIVATE cxx_std_17)
 
 if(MSVC)
     target_compile_options(dictionary_search PRIVATE /W4 /EHsc)
+    target_link_libraries(dictionary_search PRIVATE winhttp.lib)
 else()
     target_compile_options(dictionary_search PRIVATE -Wall -Wextra -Wpedantic)
 endif()
